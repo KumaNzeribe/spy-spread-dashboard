@@ -118,8 +118,6 @@ else:
 # =================================================
 # FINAL DECISION
 # =================================================
-trade_action = "NO TRADE"
-
 if not market_permission:
     trade_action = "NO TRADE (Market Risk OFF)"
 elif near_support and stock_bias == "Bullish":
@@ -128,7 +126,6 @@ elif near_resistance and stock_bias == "Bearish":
     trade_action = "CALL CREDIT SPREAD"
 else:
     trade_action = "SKIP THIS STOCK (Mid-range or bias mismatch)"
-
 
 # =================================================
 # UI OUTPUT
@@ -169,9 +166,3 @@ else:
     st.warning(trade_action)
 
 st.caption("Educational tool only. Not financial advice.")
-
-else:
-    st.error(f"SYSTEM OFF → {direction}")
-
-st.caption("Educational tool only. Not financial advice.")
-
