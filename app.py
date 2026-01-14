@@ -2,139 +2,159 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 
-st.set_page_config(page_title="SPY Spread Regime", layout="centered")
+# -------------------------------------------------
+# Page setup
+# -------------------------------------------------
+st.set_page_config(page_title="SPY Spread System", layout="centered")
+st.title("SPY Credit Spread System")
+st.caption("Regime + Volatility + Range Location (Edge-Only Entries)")
 
-st.title("SPY Spread Regime (Yahoo Finance)")
-st.caption("Rule: SPY vs 50-DMA + VIX < 25 + Chop filter")
-
-# -----------------------------
-# Sidebar settings
-# -----------------------------
+# -------------------------------------------------
+# Sidebar parameters
+# -------------------------------------------------
 DIST_BAND = st.sidebar.slider("Chop distance band (%)", 0.1, 2.0, 0.6, 0.1) / 100
 CROSS_LOOKBACK = st.sidebar.slider("Crossover lookback (days)", 5, 30, 10, 1)
-CROSS_THRESHOLD = st.sidebar.slider("Chop crossover threshold", 1, 10, 3, 1)
-VIX_THRESHOLD = st.sidebar.slider("VIX threshold", 10, 40, 25, 1)
+CROSS_THRESHOLD = st.sidebar.slider("Crossover threshold", 1, 10, 3, 1)
+VIX_THRESHOLD = st.sidebar.slider("VIX threshold", 10, 40, 20, 1)
 
-# -----------------------------
+RANGE_LOOKBACK = st.sidebar.slider("Range lookback (days)", 10, 40, 20, 1)
+ATR_LOOKBACK = st.sidebar.slider("ATR lookback", 7, 21, 14, 1)
+ATR_BUFFER = st.sidebar.slider("ATR edge buffer (%)", 10, 50, 25, 5) / 100
+
+# -------------------------------------------------
 # Data loading
-# -----------------------------
-@st.cache_data(ttl=60 * 15)
+# -------------------------------------------------
+@st.cache_data(ttl=900)
 def load_data():
-    spy = yf.download(
-        "SPY",
-        period="1y",
-        interval="1d",
-        auto_adjust=True,
-        progress=False,
-        group_by="column",  # helps keep columns consistent
-    )
-    vix = yf.download(
-        "^VIX",
-        period="5d",
-        interval="1d",
-        auto_adjust=True,
-        progress=False,
-        group_by="column",
-    )
+    spy = yf.download("SPY", period="1y", interval="1d", auto_adjust=True, progress=False)
+    vix = yf.download("^VIX", period="10d", interval="1d", auto_adjust=True, progress=False)
 
-    # Flatten MultiIndex columns if Yahoo returns them
     if isinstance(spy.columns, pd.MultiIndex):
         spy.columns = spy.columns.get_level_values(0)
     if isinstance(vix.columns, pd.MultiIndex):
         vix.columns = vix.columns.get_level_values(0)
 
-    return spy, vix
-
+    return spy.dropna(), vix.dropna()
 
 spy_df, vix_df = load_data()
 
-if spy_df.empty or vix_df.empty:
-    st.error("Failed to load data from Yahoo Finance. Try again later.")
+if spy_df.empty or vix_df.empty or len(spy_df) < 60:
+    st.error("Insufficient data loaded.")
     st.stop()
 
-spy_df = spy_df.dropna()
-
-# Need enough data to compute SMA50 reliably
-if len(spy_df) < 60:
-    st.error("Not enough SPY data returned to compute SMA50. Try again later.")
-    st.stop()
-
-# -----------------------------
-# Indicator calculations
-# -----------------------------
+# -------------------------------------------------
+# Indicators
+# -------------------------------------------------
+spy_df["SMA20"] = spy_df["Close"].rolling(20).mean()
 spy_df["SMA50"] = spy_df["Close"].rolling(50).mean()
 
 close = float(spy_df["Close"].iloc[-1])
+sma20 = float(spy_df["SMA20"].iloc[-1])
 sma50 = float(spy_df["SMA50"].iloc[-1])
 
-# Distance band chop filter
+# -------------------------------------------------
+# Chop detection
+# -------------------------------------------------
 distance_pct = abs(close - sma50) / sma50
 chop_distance = distance_pct < DIST_BAND
 
-# VIX latest close
-vix_df = vix_df.dropna()
-vix_value = float(vix_df["Close"].iloc[-1])
-
-# Crossover chop filter
-last = spy_df.dropna().tail(CROSS_LOOKBACK + 1).copy()
-
-# If SMA50 has NaNs near the start of the slice, trim again
-last = last.dropna(subset=["SMA50", "Close"])
-if len(last) < 2:
-    st.error("Not enough recent data to evaluate crossovers. Try again later.")
-    st.stop()
-
-above = last["Close"] > last["SMA50"]
-crosses = int((above != above.shift(1)).sum() - 1)
+recent = spy_df.tail(CROSS_LOOKBACK + 1).dropna(subset=["Close", "SMA50"])
+above = recent["Close"] > recent["SMA50"]
+crosses = int((above != above.shift()).sum() - 1)
 chop_cross = crosses >= CROSS_THRESHOLD
 
-chop = bool(chop_distance or chop_cross)
+chop = chop_distance or chop_cross
 
-# System ON/OFF
-system_on = (vix_value < VIX_THRESHOLD) and (not chop)
+# -------------------------------------------------
+# Volatility filter
+# -------------------------------------------------
+vix_value = float(vix_df["Close"].iloc[-1])
+vol_ok = vix_value < VIX_THRESHOLD
 
-# -----------------------------
-# UI output
-# -----------------------------
-st.subheader("Current Read")
+# -------------------------------------------------
+# ATR + Range Location
+# -------------------------------------------------
+high = spy_df["High"]
+low = spy_df["Low"]
+prev_close = spy_df["Close"].shift()
 
-col1, col2, col3 = st.columns(3)
-col1.metric("SPY Close", f"{close:,.2f}")
-col2.metric("SPY 50-DMA", f"{sma50:,.2f}")
-col3.metric("VIX", f"{vix_value:,.2f}")
+tr = pd.concat([
+    high - low,
+    (high - prev_close).abs(),
+    (low - prev_close).abs()
+], axis=1).max(axis=1)
+
+spy_df["ATR"] = tr.rolling(ATR_LOOKBACK).mean()
+
+support = low.rolling(RANGE_LOOKBACK).min().iloc[-1]
+resistance = high.rolling(RANGE_LOOKBACK).max().iloc[-1]
+atr = spy_df["ATR"].iloc[-1]
+
+near_support = close <= support + ATR_BUFFER * atr
+near_resistance = close >= resistance - ATR_BUFFER * atr
+mid_range = not (near_support or near_resistance)
+
+# -------------------------------------------------
+# Market regime
+# -------------------------------------------------
+if sma20 > sma50:
+    regime = "Bullish"
+elif sma20 < sma50:
+    regime = "Bearish"
+else:
+    regime = "Neutral"
+
+# -------------------------------------------------
+# Final decision logic
+# -------------------------------------------------
+system_on = vol_ok and not chop and not mid_range
+
+direction = "NO TRADE"
+
+if system_on:
+    if regime == "Bullish" and near_support:
+        direction = "PUT CREDIT SPREADS"
+    elif regime == "Bearish" and near_resistance:
+        direction = "CALL CREDIT SPREADS"
+    else:
+        system_on = False
+        direction = "NO TRADE (Location/Regime mismatch)"
+
+# -------------------------------------------------
+# UI OUTPUT
+# -------------------------------------------------
+st.subheader("Market Snapshot")
+
+c1, c2, c3 = st.columns(3)
+c1.metric("SPY Close", f"{close:,.2f}")
+c2.metric("SMA 20 / 50", f"{sma20:,.2f} / {sma50:,.2f}")
+c3.metric("VIX", f"{vix_value:,.2f}")
 
 st.write("### Filters")
-st.write(
-    f"- Distance from 50-DMA: **{distance_pct*100:.2f}%** "
-    f"(chop if < **{DIST_BAND*100:.2f}%**)"
+st.write(f"- Regime: **{regime}**")
+st.write(f"- Volatility OK: **{'YES' if vol_ok else 'NO'}**")
+st.write(f"- Chop Detected: **{'YES' if chop else 'NO'}**")
+st.write(f"- Distance from SMA50: **{distance_pct*100:.2f}%**")
+st.write(f"- SMA50 Crosses ({CROSS_LOOKBACK}d): **{crosses}**")
+
+st.write("### Range Location")
+st.write(f"- Support ({RANGE_LOOKBACK}d): **{support:,.2f}**")
+st.write(f"- Resistance ({RANGE_LOOKBACK}d): **{resistance:,.2f}**")
+st.write(f"- ATR ({ATR_LOOKBACK}): **{atr:,.2f}**")
+
+location = (
+    "Near Support" if near_support else
+    "Near Resistance" if near_resistance else
+    "Mid-Range"
 )
-st.write(
-    f"- Crossovers (last {CROSS_LOOKBACK} days): **{crosses}** "
-    f"(chop if ≥ **{CROSS_THRESHOLD}**)"
-)
-st.write(f"- VIX gate: **{vix_value:.2f}** (must be < **{VIX_THRESHOLD}**)")
-st.write(f"- Chop status: **{'YES' if chop else 'NO'}**")
+st.write(f"- Location: **{location}**")
 
 st.write("---")
 
-if not system_on:
-    st.error("SYSTEM: OFF")
-
-    reasons = []
-    if vix_value >= VIX_THRESHOLD:
-        reasons.append(f"VIX ≥ {VIX_THRESHOLD}")
-    if chop:
-        if chop_distance:
-            reasons.append("Chop: price too close to 50-DMA")
-        if chop_cross:
-            reasons.append("Chop: too many 50-DMA crossovers")
-    if not reasons:
-        reasons.append("Unknown / data issue")
-
-    st.write("Reason(s): " + ", ".join(reasons))
+if system_on:
+    st.success(f"SYSTEM ON → {direction}")
 else:
-    direction = "PUT CREDIT SPREADS" if close > sma50 else "CALL CREDIT SPREADS"
-    st.success(f"SYSTEM: ON → {direction}")
+    st.error(f"SYSTEM OFF → {direction}")
 
-st.caption("Educational dashboard only. Not financial advice.")
+st.caption("Educational tool only. Not financial advice.")
 
