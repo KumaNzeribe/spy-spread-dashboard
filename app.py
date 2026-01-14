@@ -122,13 +122,13 @@ trade_action = "NO TRADE"
 
 if not market_permission:
     trade_action = "NO TRADE (Market Risk OFF)"
+elif near_support and stock_bias == "Bullish":
+    trade_action = "PUT CREDIT SPREAD"
+elif near_resistance and stock_bias == "Bearish":
+    trade_action = "CALL CREDIT SPREAD"
 else:
-    if near_support and stock_bias == "Bullish":
-        trade_action = "PUT CREDIT SPREAD"
-    elif near_resistance and stock_bias == "Bearish":
-        trade_action = "CALL CREDIT SPREAD"
-    else:
-        trade_action = "SKIP THIS STOCK (Mid-range or bias mismatch)"
+    trade_action = "SKIP THIS STOCK (Mid-range or bias mismatch)"
+
 
 # =================================================
 # UI OUTPUT
